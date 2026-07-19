@@ -1,123 +1,178 @@
-import scapy.all as scapy
-import pandas as pd
+"""
+sniffer.py - Fully integrated version
+-----------------------------------------
+This replaces the old signature-only detection (port == 80 / ICMP rules)
+with the real pipeline that was missing before:
+
+    raw packets -> ConnectionTracker (flow_aggregator.py) -> IDSEngine (ai_logic.py)
+
+Every finished or timed-out connection is scored by the actual trained
+Random Forest model, not by hardcoded port rules.
+
+Remaining fixes carried over from the previous version:
+- No hardcoded Telegram token / password - read from .env.
+- No "Bank Muscat" branding.
+- No unsafe file permissions.
+
+Run with: sudo python sniffer.py   (root is required for raw packet capture)
+Test only against your own network / devices that you own or are authorized
+to monitor.
+"""
+
 import os
-import requests
 import time
 import threading
 from datetime import datetime
-from scapy.layers.inet import IP, TCP, ICMP
 
-# --- ADVANCED CONFIGURATION ---
+import pandas as pd
+import requests
+import scapy.all as scapy
+from scapy.layers.inet import IP, TCP, UDP, ICMP
+from dotenv import load_dotenv
+
+from flow_aggregator import ConnectionTracker
+from ai_logic import IDSEngine
+
+load_dotenv()
+
+
 class Config:
     LOG_FILE = "live_alerts.csv"
     SYSTEM_LOG = "ids_internal.log"
-    COLUMNS = ['Time', 'Source', 'Destination', 'Protocol', 'Confidence', 'Analysis', 'Severity', 'Status']
-    TOKEN = "8718085141:AAE_vlNoYYCLAI6oJv7v6N_TgZ_8_w4j3A0"
-    CHAT_ID = "8651183020"
-    USER_NAME = "Said Alkalbani"
-    USER_ID = "21F21729"
-    COOLDOWN_PERIOD = 3  # Fast response for demonstration
+    COLUMNS = ["Time", "Source", "Destination", "Service", "Flag", "Prediction", "Confidence", "Severity"]
 
-# --- THE IDS CORE ENGINE ---
-class BankMuscatIDS:
-    def __init__(self):
-        self.last_alerts = {} 
+    TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+    IDLE_TIMEOUT_SECONDS = 5.0     # how long a quiet connection waits before being scored
+    SWEEP_INTERVAL_SECONDS = 1.0   # how often we check for timed-out connections
+
+
+class NIDSSniffer:
+    def __init__(self, model_path: str = "ids_model_v3.pkl"):
+        self.tracker = ConnectionTracker()
+        self.engine = IDSEngine(model_path)
         self.initialize_system()
+        self._last_sweep = time.time()
 
     def initialize_system(self):
-        """Prepares the professional logging environment"""
-        # Create CSV if not exists or if empty
         if not os.path.exists(Config.LOG_FILE) or os.stat(Config.LOG_FILE).st_size == 0:
             pd.DataFrame(columns=Config.COLUMNS).to_csv(Config.LOG_FILE, index=False)
-        
         with open(Config.SYSTEM_LOG, "a") as f:
-            f.write(f"[{datetime.now()}] ENGINE_START: Initiated by {Config.USER_NAME}\n")
-        
-        try:
-            os.chmod(Config.LOG_FILE, 0o777)
-        except:
-            pass
-        print(f"[*] Security Environment Secured. Log: {Config.LOG_FILE}")
+            f.write(f"[{datetime.now()}] ENGINE_START\n")
+        print(f"[*] Logging initialized: {Config.LOG_FILE}")
+        print(f"[*] Model loaded, ready to score live connections.")
 
-    def telegram_sender(self, message):
-        """Asynchronous Telegram dispatcher"""
+    def telegram_sender(self, message: str):
+        if not Config.TELEGRAM_TOKEN or not Config.TELEGRAM_CHAT_ID:
+            return
         try:
-            requests.post(f"https://api.telegram.org/bot{Config.TOKEN}/sendMessage", 
-                          data={'chat_id': Config.CHAT_ID, 'text': message}, timeout=2)
-        except:
+            requests.post(
+                f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage",
+                data={"chat_id": Config.TELEGRAM_CHAT_ID, "text": message},
+                timeout=2,
+            )
+        except Exception:
             pass
 
     def process_packet(self, packet):
-        """Advanced Threat Detection Logic"""
         if not packet.haslayer(IP):
             return
 
-        src = packet[IP].src
-        dst = packet[IP].dst
+        src, dst = packet[IP].src, packet[IP].dst
+        payload_len = len(packet[IP].payload)
+        now = time.time()
+
+        if packet.haslayer(TCP):
+            protocol, dport, flags = "tcp", packet[TCP].dport, str(packet[TCP].flags)
+        elif packet.haslayer(UDP):
+            protocol, dport, flags = "udp", packet[UDP].dport, ""
+        elif packet.haslayer(ICMP):
+            protocol, dport, flags = "icmp", 0, ""
+        else:
+            return
+
+        key, conn = self.tracker.ingest_packet(src, dst, dport, protocol, payload_len, flags, now)
+
+        # Score immediately once a connection looks finished (FIN/RST seen);
+        # otherwise it will be picked up later by sweep_timeouts().
+        if self.tracker.is_finished(key):
+            self.score_connection(key)
+
+        if now - self._last_sweep > Config.SWEEP_INTERVAL_SECONDS:
+            self._last_sweep = now
+            for finished_key, result in self.tracker.sweep_timeouts(now, Config.IDLE_TIMEOUT_SECONDS):
+                self.log_result(finished_key, result)
+
+    def score_connection(self, key):
+        result = self.tracker.finalize(key)
+        if result:
+            self.log_result(key, result)
+
+    def log_result(self, key, feature_result):
+        numeric_features, categorical_features = feature_result
+        prediction = self.engine.analyze_raw(numeric_features, categorical_features)
+
+        src_ip, dst_ip, dst_port, protocol = key
         timestamp = datetime.now().strftime("%H:%M:%S")
-        
-        threat_detected = False
-        analysis, severity, confidence = "Normal", "Low", "0%"
 
-        # 1. ICMP Detection (Ping)
-        if packet.haslayer(ICMP):
-            threat_detected = True
-            analysis = "ICMP Reconnaissance Detected"
-            severity = "Medium"
-            confidence = "98%"
+        row = [
+            timestamp, src_ip, dst_ip,
+            categorical_features["service"], categorical_features["flag"],
+            prediction["type"], prediction["confidence"], prediction["severity"],
+        ]
 
-        # 2. TCP Analysis (Scans & Access Attempts)
-        elif packet.haslayer(TCP):
-            dport = packet[TCP].dport
-            flags = packet[TCP].flags
-            
-            # Detect SYN Floods or Specific Port Scans
-            if flags == "S" or dport in [21, 445, 3389, 80]:
-                threat_detected = True
-                analysis = "Unauthorized Port Access"
-                severity = "High"
-                confidence = "95%"
-
-        if threat_detected:
-            self.handle_alert(timestamp, src, dst, analysis, severity, confidence)
-
-    def handle_alert(self, time_str, src, dst, analysis, severity, conf):
-        """Manages logging and alert dispatching"""
-        alert_key = f"{src}_{analysis}"
-        current_time = time.time()
-
-        # Prevent alert spamming
-        if alert_key in self.last_alerts:
-            if current_time - self.last_alerts[alert_key] < Config.COOLDOWN_PERIOD:
-                return 
-
-        self.last_alerts[alert_key] = current_time
-        
-        # Write to CSV
         try:
             df = pd.read_csv(Config.LOG_FILE)
-            new_data = [time_str, src, dst, "TCP/IP", conf, analysis, severity, "Flagged"]
-            pd.concat([df, pd.DataFrame([new_data], columns=Config.COLUMNS)]).to_csv(Config.LOG_FILE, index=False)
-            
-            # Console Feedback
-            print(f"[{time_str}] 🚨 {analysis.upper()} | From: {src} | Conf: {conf}")
-
-            # Send to Telegram
-            msg = f"🛡️ BANK MUSCAT IDS\nThreat: {analysis}\nSource: {src}\nSeverity: {severity}\nOperator: {Config.USER_NAME}"
-            threading.Thread(target=self.telegram_sender, args=(msg,)).start()
+            new_row_df = pd.DataFrame([row], columns=Config.COLUMNS)
+            # Avoid pandas' FutureWarning about concatenating with an empty/
+            # all-NA DataFrame (happens on the very first logged row, right
+            # after initialize_system() creates an empty, header-only file).
+            if df.empty:
+                new_row_df.to_csv(Config.LOG_FILE, index=False)
+            else:
+                pd.concat([df, new_row_df], ignore_index=True).to_csv(Config.LOG_FILE, index=False)
         except Exception as e:
-            print(f"[!] Alert Logic Error: {e}")
+            print(f"[!] Logging error: {e}")
+
+        if prediction["type"] != "Normal":
+            print(f"[{timestamp}] ALERT: {prediction['type']} ({prediction['confidence']}%) "
+                  f"from {src_ip} -> {dst_ip}:{dst_port} [{prediction['severity']}]")
+            threading.Thread(
+                target=self.telegram_sender,
+                args=(f"NIDS Alert\nType: {prediction['type']}\nFrom: {src_ip}\n"
+                      f"Confidence: {prediction['confidence']}%\nSeverity: {prediction['severity']}",),
+            ).start()
+
+
+def detect_default_interface() -> str:
+    """
+    Auto-detects the network interface currently used for outbound traffic
+    (the one with the default route) instead of requiring it to be hardcoded.
+    Can still be overridden manually via the NIDS_IFACE environment variable
+    if auto-detection picks the wrong one (e.g. multiple active adapters).
+    """
+    override = os.environ.get("NIDS_IFACE")
+    if override:
+        print(f"[*] Using interface from NIDS_IFACE override: {override}")
+        return override
+
+    try:
+        iface = scapy.conf.iface
+        print(f"[*] Auto-detected active interface: {iface}")
+        return str(iface)
+    except Exception as e:
+        print(f"[!] Could not auto-detect interface ({e}), falling back to 'eth0'.")
+        print("[!] Run 'ip a' to find your real interface name, then set it via "
+              "NIDS_IFACE=<name> or edit this fallback.")
+        return "eth0"
+
 
 if __name__ == "__main__":
-    ids = BankMuscatIDS()
-    print("====================================================")
-    print(f"   BANK MUSCAT | FINAL IDS ENGINE - {Config.USER_NAME} ")
-    print(f"   System IP: 192.168.100.228 | ID: {Config.USER_ID}")
-    print("====================================================")
-    print("[*] Monitoring all interfaces... (Force Active Mode)")
-    
-    # Corrected sniff command to avoid TypeError
+    sniffer = NIDSSniffer()
+    print("[*] Monitoring interface... (Ctrl+C to stop)")
+    iface = detect_default_interface()
     try:
-        scapy.sniff(store=0, prn=ids.process_packet, iface="lo")
+        scapy.sniff(store=0, prn=sniffer.process_packet, iface=iface)
     except KeyboardInterrupt:
-        print(f"\n[!] System safely paused by {Config.USER_NAME}.")
+        print("\n[!] Stopped by user.")

@@ -1,3 +1,5 @@
+.env
+__pycache__/
 ids_model_v2.pkl
 venv/
 *.csv

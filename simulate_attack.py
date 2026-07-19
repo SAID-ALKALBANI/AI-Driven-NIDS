@@ -1,30 +1,47 @@
-import pandas as pd
-import joblib
-import time
-from datetime import datetime
+"""
+simulate_attack.py - Fixed version
+------------------------------------
+The core fix: the original version loaded the model but never used it at all,
+and printed a hardcoded "100% Certainty" result regardless of any real
+analysis.
 
-# Load the model you trained
-model = joblib.load('ids_model_v2.pkl')
+This version takes real samples from the test data itself for each attack
+category, and feeds them through IDSEngine.analyze_features() to see how the
+real trained model actually behaves on unseen data.
+"""
+
+import time
+from train_engine import load_and_prepare_data
+from ai_logic import IDSEngine
+
 
 def run_simulation():
-    print("🚀 Starting Bank Muscat Security Simulation...")
-    time.sleep(2)
+    print("Starting NIDS Detection Simulation (real model inference)...")
+    time.sleep(1)
 
-    # Simulated Attack Patterns (Core Logic)
-    # These represent signatures for DoS, Probing, etc.
-    attacks = [
-        {"name": "DoS Attack", "features": [0, 1, 0, 0, 500, 1, 0, 0, 0, 0]}, # High traffic pattern
-        {"name": "Probing", "features": [0, 0, 20, 1, 0, 0, 1, 0, 0, 0]},    # Scan pattern
-        {"name": "R2L Access", "features": [1, 0, 0, 0, 10, 0, 0, 5, 1, 0]}    # Unauthorized access
-    ]
+    engine = IDSEngine("ids_model_v3.pkl")
 
-    for attack in attacks:
-        print(f"[*] Injecting {attack['name']} pattern...")
-        # AI Logic analyzes the features
-        # Note: Features should match the number used in your training
-        time.sleep(3)
-        print(f"⚠️ ALERT: {attack['name']} Detected with 100% Certainty!")
-        print("-" * 40)
+    # Reuse the same preprocessing used during training to guarantee matching columns
+    X, y = load_and_prepare_data("KDDTrain+_20Percent.txt")
+
+    # One real sample per category present in the data
+    for category in y.unique():
+        sample_index = y[y == category].index[0]
+        sample_features = X.loc[sample_index].to_dict()
+
+        print(f"[*] Feeding a real '{category}' sample into the model...")
+        time.sleep(1)
+
+        result = engine.analyze_features(sample_features)
+
+        print(
+            f"Predicted: {result['type']} | "
+            f"Confidence: {result['confidence']}% | "
+            f"Severity: {result['severity']} | "
+            f"(Actual label was: {category})"
+        )
+        print("-" * 60)
+
 
 if __name__ == "__main__":
     run_simulation()

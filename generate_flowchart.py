@@ -1,3 +1,14 @@
+"""
+generate_flowchart.py - Fixed version
+----------------------------------------
+Fixes:
+1. Removed the false "Snort 3 Engine" label. This project does not integrate
+   Snort at all - the signature detection in sniffer.py is a custom Python/
+   scapy implementation. Labeling it as Snort would misrepresent the actual
+   architecture to anyone reviewing the diagram against the code.
+2. Removed the "Bank Muscat" branding from the subtitle.
+"""
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -9,15 +20,12 @@ ax.axis('off')
 
 # Helper function to draw styled component boxes
 def draw_box(ax, x, y, w, h, text, title, box_color, text_color='white'):
-    # Draw main structural box
-    rect = patches.FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.1", 
+    rect = patches.FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.1",
                                   linewidth=1.5, edgecolor=box_color, facecolor=box_color)
     ax.add_patch(rect)
-    # Add title string
-    ax.text(x + w/2, y + h - 0.3, title, weight='bold', color=text_color, 
+    ax.text(x + w/2, y + h - 0.3, title, weight='bold', color=text_color,
             fontsize=10, ha='center', va='center')
-    # Add body text description
-    ax.text(x + w/2, y + h/2 - 0.2, text, color=text_color, 
+    ax.text(x + w/2, y + h/2 - 0.2, text, color=text_color,
             fontsize=8.5, ha='center', va='center', style='italic')
 
 # Helper function to draw directed data flow arrows
@@ -25,7 +33,7 @@ def draw_arrow(ax, x1, y1, x2, y2, label=""):
     ax.annotate('', xy=(x2, y2), xytext=(x1, y1),
                 arrowprops=dict(arrowstyle="->", color="#1e293b", lw=2))
     if label:
-        ax.text((x1+x2)/2, ((y1+y2)/2)+0.15, label, fontsize=8, 
+        ax.text((x1+x2)/2, ((y1+y2)/2)+0.15, label, fontsize=8,
                 color="#475569", weight='bold', ha='center')
 
 # --- Render Pipeline Architecture Components ---
@@ -33,8 +41,8 @@ def draw_arrow(ax, x1, y1, x2, y2, label=""):
 # 1. Network Traffic Source
 draw_box(ax, 0.5, 2.2, 1.8, 1.4, "Loopback Interface\n(Raw Packet Frames)", "1. Traffic Ingestion", "#0284c7")
 
-# 2. Signature Detection Layer
-draw_box(ax, 3.2, 2.2, 2.0, 1.4, "Custom DDoS Rules\n& Signature Matching", "2. Snort 3 Engine", "#b91c1c")
+# 2. Signature Detection Layer (custom Python/scapy logic, NOT Snort)
+draw_box(ax, 3.2, 2.2, 2.0, 1.4, "Custom Rules\n& Signature Matching", "2. Detection Layer (sniffer.py)", "#b91c1c")
 
 # 3. Intelligent Classification Bridge
 draw_box(ax, 6.0, 2.2, 2.0, 1.4, "ai_logic.py\n(Random Forest Core)", "3. ML Classifier", "#0f766e")
@@ -48,9 +56,9 @@ draw_arrow(ax, 5.3, 2.9, 5.9, 2.9, "Packet Metrics")
 draw_arrow(ax, 8.1, 2.9, 8.7, 2.9, "Prediction Vectors")
 
 # Main architectural chart headers
-ax.text(5.5, 5.2, "Hybrid Network Intrusion Detection System (NIDS) Architectural Pipeline", 
+ax.text(5.5, 5.2, "Hybrid Network Intrusion Detection System (NIDS) Architectural Pipeline",
         fontsize=13, weight='bold', color='#0f172a', ha='center')
-ax.text(5.5, 4.8, "Bank Muscat Security Operations Blueprint - Structural Telemetry Flow", 
+ax.text(5.5, 4.8, "Structural Telemetry Flow Overview",
         fontsize=10, color='#64748b', ha='center', style='italic')
 
 # Compile and export schematic view

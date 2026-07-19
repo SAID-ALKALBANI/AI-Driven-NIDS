@@ -1,0 +1,7 @@
+pandas
+scikit-learn
+joblib
+streamlit
+scapy
+requests
+python-dotenv

@@ -1,22 +1,210 @@
-# AI-Driven Network Intrusion Detection System (NIDS)
-## Enterprise Security Dashboard Integration
+# SentinelCore-IDS
 
-This repository contains the complete operational source code for an intelligent Network Intrusion Detection System (NIDS) designed to protect modern financial enterprise architectures. 
+An AI-driven Network Intrusion Detection System (NIDS) built on the NSL-KDD
+dataset. It combines a trained machine learning classifier with a live
+packet-capture pipeline and a monitoring dashboard.
 
-The security architecture models the aesthetic and structural requirements of leading banking networks, providing real-time packet tracking, threat analysis, and dynamic metric visualizations.
+> Naming note: this project has no affiliation with any bank or financial
+> institution. Earlier local working copies of this project used a bank's
+> name as a placeholder; that has been fully removed from the code, the
+> architecture diagram, and this document.
 
-### 🛡️ Core System Components
-* **`dashboard.py`**: Streamlit-powered security console visualizing attack streams, protocol splits, and severity tiers.
-* **`ai_logic.py`**: Core AI routing module interfacing with machine learning logic to run real-time traffic classification.
-* **`simulate_attack.py`**: Multithreaded intrusion simulation matrix generating multi-vector threats (DoS, Probing, R2L).
-* **`sniffer.py`**: Local automated live network capturing engine processing active raw sockets.
-* **`train_engine.py`**: Structural pipeline dedicated to optimization and training benchmarks.
+## What this project actually does
 
-### ⚙️ Technical Environment
-* **Platform**: Kali Linux Integration Environment
-* **Core Language**: Python 3.13
-* **Primary Frameworks**: Streamlit, Scikit-Learn, Pandas, Joblib
-* **Data Context**: Optimized NSL-KDD Feature Matrices
+1. **Offline training** (`train_engine.py`): trains a Random Forest classifier
+   on the NSL-KDD dataset to classify network connections into 5 categories:
+   `Normal`, `DoS`, `Probe`, `R2L`, `U2R`.
+2. **Live capture pipeline** (`sniffer.py` + `flow_aggregator.py`): captures
+   raw packets from a network interface, aggregates them into
+   connection-level statistics, and feeds those into the trained model in
+   real time.
+3. **Classification logic** (`ai_logic.py`): loads the trained model and
+   returns a prediction, confidence score, and severity level for a given
+   connection.
+4. **Dashboard** (`dashboard.py`): a Streamlit app showing live, flagged
+   connections from the capture pipeline.
+5. **Evaluation tools** (`show_matrix.py`, `simulate_attack.py`): measure and
+   demonstrate real model performance, on both familiar and fully unseen
+   data.
 
----
-*Developed as part of the Computer Engineering Graduation Portfolio (Academic Year 2026).*
+## Real, measured model performance
+
+These numbers come from actually running `train_engine.py` and
+`show_matrix.py` on the NSL-KDD dataset — they are not estimates or
+illustrative figures.
+
+**Trained on `KDDTrain+_20Percent.txt`, evaluated on an internal 80/20
+held-out split (same source file):**
+
+| Category | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| DoS | 1.00 | 1.00 | 1.00 | 1847 |
+| Normal | 0.99 | 1.00 | 1.00 | 2690 |
+| Probe | 1.00 | 0.98 | 0.99 | 458 |
+| R2L | 1.00 | 0.90 | 0.95 | 42 |
+| U2R | 0.00 | 0.00 | 0.00 | 2 |
+
+Overall accuracy: **99.66%**
+
+**Same model, evaluated on the official `KDDTest+.txt` — data the model has
+never seen at all, containing attack subtypes absent from the training
+file:**
+
+| Category | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| DoS | 0.96 | 0.77 | 0.86 | 7458 |
+| Normal | 0.64 | 0.97 | 0.77 | 9711 |
+| Probe | 0.87 | 0.59 | 0.70 | 2421 |
+| R2L | 1.00 | 0.0065 | 0.013 | 2754 |
+| U2R | 1.00 | 0.01 | 0.02 | 200 |
+
+Overall accuracy: **73.96%**
+
+### Why these two numbers are so different (and why that's expected)
+
+The 99.66% figure reflects performance on data statistically similar to
+what the model trained on. The 73.96% figure reflects performance on
+`KDDTest+`, which NSL-KDD deliberately designed to include attack subtypes
+that never appear in the training file — specifically to test
+generalization to unseen attacks. The near-total collapse in R2L/U2R recall
+on `KDDTest+` is a well-documented, known property of this dataset split,
+not a bug in this implementation. Reporting only the 99.66% number would be
+misleading; both numbers are included here deliberately.
+
+### The one honest caveat on the internal split
+
+The internal 80/20 split's U2R row has a support of only 2 samples. A
+precision/recall/F1 of 0.00 on 2 samples is not a meaningful measurement of
+U2R detection ability — it simply reflects how rare U2R attacks are, even
+in the training file. Draw conclusions about U2R performance from the
+`KDDTest+` results, not the internal split.
+
+## Architecture
+
+See `NIDS_Data_Flow.png` (generated by `generate_flowchart.py`) for a visual
+overview: traffic ingestion → detection layer → ML classifier → dashboard.
+
+## The live packet-capture pipeline: scope and honest limitations
+
+`flow_aggregator.py` converts raw packets into an **approximation** of
+NSL-KDD's connection-level features (duration, byte counts, short-term and
+per-host connection counts, a heuristic connection-state flag). This is
+**not** an exact reproduction of the original KDD Cup feature extraction,
+which used purpose-built tools (Bro/Zeek) operating on full packet captures
+with proprietary logic.
+
+Specifically:
+- Features derivable from packet headers (duration, src/dst_bytes, count,
+  srv_count, serror_rate, dst_host_count, dst_host_srv_count) are computed
+  from live traffic.
+- Features that require application-layer or host-based visibility
+  (`num_failed_logins`, `num_compromised`, `num_shells`, `root_shell`, etc.)
+  are **not observable from packet headers alone** and are left at 0 for
+  live traffic. This means live detection accuracy will differ from the
+  offline benchmark numbers above, particularly for attack types that rely
+  heavily on those application-layer signals (R2L, U2R).
+- The `service` field is inferred from a small destination-port lookup
+  table, not full protocol inspection.
+- The `flag` field (SF/S0/REJ/RSTO/...) is a simplified heuristic based on
+  observed TCP flags, not Bro's exact connection-state machine.
+
+This is a deliberate, documented engineering trade-off, not an oversight.
+
+## Live network testing results
+
+The full pipeline (`sniffer.py` → `flow_aggregator.py` → `ai_logic.py` →
+`dashboard.py`) was tested end-to-end on a real home network (auto-detected
+`eth0` interface, not loopback), with real traffic and a real authorized
+port scan. These are actual observed results, not simulated ones.
+
+**Normal traffic (regular browsing / mDNS / SSDP background chatter):**
+Consistently classified as `Normal`, confidence roughly 63-85%, no false
+alarms during ordinary use.
+
+**Authorized SYN scan (`sudo nmap -sS <own-device-IP>`) against a device on
+the same LAN:**
+Every connection from the scan was classified as `DoS` with `High` severity,
+confidence around 50-51%, flag `S0` (SYN sent, no reply — correctly
+detected by `flow_aggregator.py`'s heuristic).
+
+Why `DoS` and not `Probe`: `nmap`'s default SYN scan sends a large number of
+SYN packets to the same destination in a very short time window. That
+matches the statistical signature of `neptune` (a classic DoS attack in
+NSL-KDD — SYN flooding without completing the handshake) more closely than
+a slower `Probe`-style scan (`ipsweep`/`portsweep`), because the `count`/
+`srv_count` short-term features spike so sharply. This is a real and
+reasonable model behavior, not a misclassification bug — it reflects how
+the model actually learned to separate these categories during training,
+and is an accurate description of what was observed, not a claim about how
+the model would behave on every possible scan speed or tool.
+
+One practical lesson from testing: `nmap -sS 127.0.0.1` (or any scan of the
+same IP the machine itself holds) produced no alerts at all. This is
+expected — Linux routes loopback/self-directed traffic through the `lo`
+interface regardless of the destination address, so a sniffer listening on
+`eth0` never sees those packets. Testing must target a genuinely different
+device on the LAN (e.g. the router) to produce visible traffic on the
+monitored interface.
+
+## Setup
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # fill in your own Telegram bot token/chat ID if you want alerts (optional)
+```
+
+## Usage
+
+```bash
+# 1. Train the model on NSL-KDD data (KDDTrain+_20Percent.txt must be present)
+python train_engine.py
+
+# 2. Evaluate it on both the internal split and the official unseen test set
+#    (KDDTest+.txt must be downloaded and present in this folder)
+python show_matrix.py
+
+# 3. See the trained model classify real samples from the dataset
+python simulate_attack.py
+
+# 4. Run live capture on your own network (requires root for raw sockets)
+#    The network interface is auto-detected (see flow_aggregator.py /
+#    sniffer.py's detect_default_interface()). Override it if needed with:
+#    NIDS_IFACE=<name> sudo -E python sniffer.py
+sudo python sniffer.py
+
+# 5. View live results in the dashboard (run in a separate terminal)
+streamlit run dashboard.py
+```
+
+## Ethical use notice
+
+Only run `sniffer.py` against networks and devices you own or are
+explicitly authorized to monitor. Capturing traffic on networks you do not
+control, or scanning devices without authorization, may be illegal
+depending on your jurisdiction.
+
+## Known limitations (summary)
+
+- Live detection accuracy is expected to be lower than the offline
+  benchmark numbers, especially for R2L/U2R, because several NSL-KDD
+  features cannot be derived from packet headers alone (see above).
+- `service` and `flag` fields for live traffic are heuristic
+  approximations, not exact reproductions of NSL-KDD's original feature
+  extraction.
+- Fast SYN scans were observed to be classified as `DoS` rather than
+  `Probe` in live testing (see "Live network testing results" above) — this
+  reflects a genuine statistical overlap between fast scans and DoS
+  patterns in the model's feature space, not a bug to be silently
+  "corrected" without further investigation.
+- The model was trained on `KDDTrain+_20Percent.txt` (a 20% subset).
+  Training on the full `KDDTrain+.txt` may improve R2L/U2R performance and
+  has not yet been tried in this project.
+- U2R representation in both training and test data is extremely small
+  (2-200 samples), which limits how much can be concluded about U2R
+  detection specifically.
+
+## License
+
+Released under the MIT License. See `LICENSE` for the full text.
