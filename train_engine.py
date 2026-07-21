@@ -16,12 +16,14 @@ Key fixes compared to the original version:
    since accuracy is misleading on imbalanced data.
 """
 
+import argparse
 import pandas as pd
 import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder
+from anomaly_detector import AnomalyDetector
 
 # --- 1. Official NSL-KDD column names (41 features + label + difficulty_level) ---
 COLUMN_NAMES = [
@@ -74,7 +76,26 @@ def load_and_prepare_data(path: str) -> tuple[pd.DataFrame, pd.Series]:
 
 
 def main():
-    X, y = load_and_prepare_data("KDDTrain+_20Percent.txt")
+    parser = argparse.ArgumentParser(description="Train the NIDS Random Forest model.")
+    parser.add_argument(
+        "--data", default="KDDTrain+_20Percent.txt",
+        help="Path to the NSL-KDD training file (default: KDDTrain+_20Percent.txt)"
+    )
+    parser.add_argument(
+        "--output", default="ids_model_v3.pkl",
+        help="Path to save the trained model bundle (default: ids_model_v3.pkl)"
+    )
+    parser.add_argument(
+        "--anomaly-output", default="anomaly_model.pkl",
+        help="Path to save the unsupervised anomaly-detection model (default: anomaly_model.pkl)"
+    )
+    parser.add_argument(
+        "--skip-anomaly", action="store_true",
+        help="Skip training the anomaly-detection layer (only train the RandomForest classifier)"
+    )
+    args = parser.parse_args()
+
+    X, y = load_and_prepare_data(args.data)
 
     # Encode text labels (Normal/DoS/Probe/R2L/U2R) into numbers for training
     label_encoder = LabelEncoder()
@@ -84,7 +105,7 @@ def main():
         X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
     )
 
-    print("[*] Training started... please wait.")
+    print(f"[*] Training started on '{args.data}'... please wait.")
     model = RandomForestClassifier(
         n_estimators=200,
         class_weight="balanced",  # handles class imbalance (U2R is very rare)
@@ -104,8 +125,19 @@ def main():
         "model": model,
         "label_encoder": label_encoder,
         "feature_columns": list(X.columns),
-    }, "ids_model_v3.pkl")
-    print("[+] Model bundle saved as 'ids_model_v3.pkl'")
+    }, args.output)
+    print(f"[+] Model bundle saved as '{args.output}'")
+
+    if not args.skip_anomaly:
+        print(f"\n[*] Training unsupervised anomaly detector on Normal-only traffic...")
+        normal_label_encoded = label_encoder.transform(["Normal"])[0]
+        X_normal_only = X_train[y_train == normal_label_encoded]
+
+        detector = AnomalyDetector(contamination=0.01)
+        detector.fit(X_normal_only)
+        detector.save(args.anomaly_output)
+        print(f"[+] Anomaly detector trained on {len(X_normal_only)} Normal samples, "
+              f"saved as '{args.anomaly_output}'")
 
 
 if __name__ == "__main__":
