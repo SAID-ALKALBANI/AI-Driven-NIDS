@@ -8,13 +8,15 @@ history, not properties of a single packet.
 
 Honesty note on scope: this module approximates a *practical subset* of the
 41 NSL-KDD features from live packet headers alone (source/destination
-bytes, duration, counts within a time window, coarse service/flag guesses).
-It does NOT reproduce the original KDD Cup preprocessing exactly (that used
-proprietary Bro/Zeek-based feature extraction over raw tcpdump captures).
-Application-layer features that need payload/session context (num_failed_logins,
-num_compromised, num_shells, etc.) are NOT observable from packet headers
-alone, so they are left at 0. This is a real, documented limitation, not
-something to hide.
+bytes, duration, counts within a time window, coarse service/flag guesses,
+and now a proxy for num_failed_logins/logged_in based on repeated failed
+connection attempts to auth-relevant services). It does NOT reproduce the
+original KDD Cup preprocessing exactly (that used proprietary Bro/Zeek-based
+feature extraction over raw tcpdump captures, with real session/payload
+visibility). Features that still need deeper application-layer visibility
+(num_compromised, num_shells, root_shell, etc.) are NOT observable from
+packet headers alone, so they remain at 0. This is a real, documented
+limitation, not something to hide.
 
 Kept independent of scapy on purpose (only plain dicts in/out) so it can be
 unit-tested without a live packet capture or root privileges.
@@ -33,6 +35,15 @@ PORT_SERVICE_MAP = {
 
 TIME_WINDOW_SECONDS = 2       # "count"/"srv_count" style short-term window
 HOST_HISTORY_SIZE = 100       # "dst_host_*" style longer-term window
+
+# Services where repeated failed connection attempts from the same source to
+# the same destination are a meaningful R2L/brute-force signal (guess_passwd,
+# ftp_write, etc. all target these). Used to approximate num_failed_logins
+# and logged_in, which the original NSL-KDD features derive from session
+# content we cannot see - this is a connection-level proxy instead.
+AUTH_SERVICES = {"ftp", "ssh", "telnet", "pop_3", "imap4"}
+AUTH_WINDOW_SECONDS = 60
+FAILED_FLAGS = {"S0", "REJ", "RSTO"}
 
 
 class Connection:
@@ -106,6 +117,8 @@ class ConnectionTracker:
         # Each entry: (timestamp, dst_ip, service, flag)
         self.recent_events: deque = deque()
         self.host_history: dict = defaultdict(lambda: deque(maxlen=HOST_HISTORY_SIZE))
+        # (src_ip, dst_ip) -> deque of (timestamp, was_failed_attempt)
+        self.auth_attempts: dict = defaultdict(deque)
 
     @staticmethod
     def service_for_port(port: int) -> str:
@@ -161,6 +174,21 @@ class ConnectionTracker:
         dst_host_count = len(host_hist)
         dst_host_srv_count = sum(1 for _, s, _ in host_hist if s == service)
 
+        # Approximate num_failed_logins / logged_in for auth-relevant services
+        # by tracking recent failed connection attempts from this source to
+        # this destination (a brute-force / guessed-password proxy signal).
+        num_failed_logins = 0
+        logged_in = 0
+        if service in AUTH_SERVICES:
+            auth_key = (conn.src_ip, conn.dst_ip)
+            attempts = self.auth_attempts[auth_key]
+            is_failed = flag in FAILED_FLAGS
+            attempts.append((now, is_failed))
+            while attempts and now - attempts[0][0] > AUTH_WINDOW_SECONDS:
+                attempts.popleft()
+            num_failed_logins = sum(1 for _, failed in attempts if failed)
+            logged_in = 1 if flag == "SF" else 0
+
         numeric_features = {
             "duration": conn.duration(),
             "src_bytes": conn.src_bytes,
@@ -172,8 +200,10 @@ class ConnectionTracker:
             "srv_serror_rate": srv_serror_rate,
             "dst_host_count": dst_host_count,
             "dst_host_srv_count": dst_host_srv_count,
+            "num_failed_logins": num_failed_logins,
+            "logged_in": logged_in,
             # The remaining NSL-KDD numeric columns need application-layer or
-            # host-based visibility (failed logins, shell access, etc.) that
+            # host-based visibility (num_compromised, num_shells, etc.) that
             # is not derivable from packet headers alone - left at 0 and
             # filled automatically by IDSEngine.analyze_raw()/reindex().
         }

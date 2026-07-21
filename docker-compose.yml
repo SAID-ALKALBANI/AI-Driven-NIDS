@@ -1,0 +1,22 @@
+# docker-compose.yml
+# ---------------------
+# Two services for the reproducible/portable parts of the project.
+# sniffer.py is intentionally NOT included here - live packet capture needs
+# raw socket + root access on the actual host network interface, which
+# doesn't fit a standard container setup. Run sniffer.py directly on the
+# host (with sudo) instead.
+
+services:
+  train:
+    build: .
+    command: python train_engine.py
+    volumes:
+      - .:/app
+
+  dashboard:
+    build: .
+    command: streamlit run dashboard.py --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app

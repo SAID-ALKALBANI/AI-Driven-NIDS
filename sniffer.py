@@ -46,6 +46,12 @@ class Config:
 
     IDLE_TIMEOUT_SECONDS = 5.0     # how long a quiet connection waits before being scored
     SWEEP_INTERVAL_SECONDS = 1.0   # how often we check for timed-out connections
+    ALERT_COOLDOWN_SECONDS = 5.0   # suppress repeat console/Telegram alerts for the
+                                    # same (source, prediction type) within this window -
+                                    # every connection is still logged to the CSV either way,
+                                    # this only reduces console/Telegram spam during things
+                                    # like a fast port scan that produces dozens of distinct
+                                    # connections in the same second.
 
 
 class NIDSSniffer:
@@ -54,6 +60,7 @@ class NIDSSniffer:
         self.engine = IDSEngine(model_path)
         self.initialize_system()
         self._last_sweep = time.time()
+        self._last_alert_time = {}  # (src_ip, prediction_type) -> last alert timestamp
 
     def initialize_system(self):
         if not os.path.exists(Config.LOG_FILE) or os.stat(Config.LOG_FILE).st_size == 0:
@@ -136,13 +143,21 @@ class NIDSSniffer:
             print(f"[!] Logging error: {e}")
 
         if prediction["type"] != "Normal":
-            print(f"[{timestamp}] ALERT: {prediction['type']} ({prediction['confidence']}%) "
-                  f"from {src_ip} -> {dst_ip}:{dst_port} [{prediction['severity']}]")
-            threading.Thread(
-                target=self.telegram_sender,
-                args=(f"NIDS Alert\nType: {prediction['type']}\nFrom: {src_ip}\n"
-                      f"Confidence: {prediction['confidence']}%\nSeverity: {prediction['severity']}",),
-            ).start()
+            alert_key = (src_ip, prediction["type"])
+            now = time.time()
+            last_time = self._last_alert_time.get(alert_key, 0)
+
+            if now - last_time >= Config.ALERT_COOLDOWN_SECONDS:
+                self._last_alert_time[alert_key] = now
+                print(f"[{timestamp}] ALERT: {prediction['type']} ({prediction['confidence']}%) "
+                      f"from {src_ip} -> {dst_ip}:{dst_port} [{prediction['severity']}]")
+                threading.Thread(
+                    target=self.telegram_sender,
+                    args=(f"NIDS Alert\nType: {prediction['type']}\nFrom: {src_ip}\n"
+                          f"Confidence: {prediction['confidence']}%\nSeverity: {prediction['severity']}",),
+                ).start()
+            # else: suppressed to avoid console/Telegram spam - the row above
+            # is still written to live_alerts.csv regardless, so no data is lost.
 
 
 def detect_default_interface() -> str:

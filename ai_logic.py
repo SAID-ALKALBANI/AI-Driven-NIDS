@@ -1,6 +1,6 @@
 """
-ai_logic.py - Fixed version
------------------------------
+ai_logic.py - Fixed version, now with an optional anomaly-detection layer
+---------------------------------------------------------------------------
 Key fixes:
 1. Loads the full "bundle" (model + label_encoder + feature_columns) saved by
    the new train_engine.py, instead of assuming a fixed numeric class mapping
@@ -10,12 +10,24 @@ Key fixes:
    source of silent bugs).
 3. severity_mapping is now keyed by the text category name (Normal/DoS/...)
    instead of an assumed integer.
+4. Optionally loads anomaly_detector.py's Isolation Forest (trained only on
+   Normal traffic). If the supervised RandomForest says "Normal" but the
+   anomaly detector disagrees (traffic looks statistically unusual), the
+   result is relabeled as "Suspicious (Unclassified)" instead of silently
+   trusting a possibly-overconfident "Normal" call. This directly addresses
+   the observed limitation that more training data from the same
+   distribution did not improve detection of unseen R2L/U2R attack
+   subtypes - the anomaly layer is a different detection principle, not
+   just "more of the same".
 """
 
+import os
 import joblib
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import pandas as pd
+
+from anomaly_detector import AnomalyDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -30,12 +42,23 @@ SEVERITY_MAPPING = {
 
 
 class IDSEngine:
-    def __init__(self, model_path: str = "ids_model_v3.pkl"):
+    def __init__(self, model_path: str = "ids_model_v3.pkl", anomaly_model_path: str = "anomaly_model.pkl"):
         self.model_path = model_path
         bundle = self._load_bundle()
         self.model = bundle["model"]
         self.label_encoder = bundle["label_encoder"]
         self.feature_columns = bundle["feature_columns"]
+
+        self.anomaly_detector: Optional[AnomalyDetector] = None
+        if os.path.exists(anomaly_model_path):
+            try:
+                self.anomaly_detector = AnomalyDetector.load(anomaly_model_path)
+                logger.info(f"Loaded anomaly detector from {anomaly_model_path}")
+            except Exception as e:
+                logger.warning(f"Could not load anomaly detector ({e}); continuing without it.")
+        else:
+            logger.info(f"No anomaly detector found at {anomaly_model_path}; "
+                        f"run train_engine.py to generate one (optional).")
 
     def _load_bundle(self) -> Dict[str, Any]:
         try:
@@ -85,11 +108,26 @@ class IDSEngine:
             probabilities = self.model.predict_proba(row)[0]
             confidence = float(max(probabilities)) * 100.0
 
-            return {
+            result = {
                 "type": prediction_label,
                 "confidence": round(confidence, 2),
                 "severity": SEVERITY_MAPPING.get(prediction_label, "Unknown"),
             }
+
+            # Cross-check with the unsupervised anomaly layer, but only when
+            # it matters: the supervised model is confident this is Normal.
+            # We deliberately do NOT override non-Normal predictions - the
+            # anomaly layer's job here is to catch things the classifier
+            # wrongly waved through, not to second-guess attacks it already
+            # flagged correctly.
+            if self.anomaly_detector is not None and prediction_label == "Normal":
+                anomaly_result = self.anomaly_detector.score(features)
+                result["anomaly_score"] = round(anomaly_result["anomaly_score"], 4)
+                if anomaly_result["is_anomaly"]:
+                    result["type"] = "Suspicious (Unclassified)"
+                    result["severity"] = "Medium"
+
+            return result
         except Exception as e:
             logger.error(f"Error analyzing packet features: {e}")
             return {
